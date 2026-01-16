@@ -27,51 +27,104 @@ in most regex engines and will be too slow in most that do. We have verified tha
 reasonably fast and supports negative lookahead, but the regex package in Python is, if anything,
 even faster
 
-"""
-from pretokenization_example import process_parallel
 
-def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict[int, bytes])->tuple[dict[int, bytes], dict[tuple[bytes], int], list[tuple[bytes, bytes]]]:
-    merges = []
+1. pre_token_counts - 预分词计数
+类型：dict[tuple[bytes], int]
+含义：每个预分词词（已转换为字节序列）及其出现次数
+例子：
+# 假设输入文本是 "hello world hello"# 经过预分词后，可能得到：pre_token_counts = {    (b'h', b'e', b'l', b'l', b'o'): 2,      # "hello" 出现2次    (b'w', b'o', b'r', b'l', b'd'): 1,      # "world" 出现1次    (b' '): 2,                               # 空格出现2次}# 更详细的例子：pre_token_counts = {    (b'h', b'e', b'l', b'l', b'o'): 2,    (b' ',): 2,    (b'w', b'o', b'r', b'l', b'd'): 1,    (b't', b'h', b'e'): 1,                  # "the" 出现1次    (b'c', b'a', b't'): 3,                  # "cat" 出现3次}
+2. merge_tables - 相邻对频率统计
+类型：dict[tuple[bytes, bytes], int]
+含义：所有相邻字节对及其出现频率
+例子（基于上面的 pre_token_counts）：
+# 从 pre_token_counts 统计所有相邻对：merge_tables = {    # 来自 "hello" (出现2次)    (b'h', b'e'): 2,    # h-e 出现2次    (b'e', b'l'): 2,    # e-l 出现2次    (b'l', b'l'): 2,    # l-l 出现2次    (b'l', b'o'): 2,    # l-o 出现2次        # 来自 "world" (出现1次)    (b'w', b'o'): 1,    # w-o 出现1次    (b'o', b'r'): 1,    # o-r 出现1次    (b'r', b'l'): 1,    # r-l 出现1次    (b'l', b'd'): 1,    # l-d 出现1次        # 来自 "the" (出现1次)    (b't', b'h'): 1,    # t-h 出现1次    (b'h', b'e'): 3,    # h-e 总共出现3次 (2次来自hello + 1次来自the)        # 来自 "cat" (出现3次)    (b'c', b'a'): 3,    # c-a 出现3次    (b'a', b't'): 3,    # a-t 出现3次        # 注意：空格单独成token，所以没有相邻对包含空格}
+3. 合并过程示例
+假设 merge_tables 中频率最高的是 (b'l', b'l')，频率为 2：
+# 合并前：pre_token_counts = {    (b'h', b'e', b'l', b'l', b'o'): 2,  "hello"    (b'w', b'o', b'r', b'l', b'd'): 1,  # "world"}merge_tables = {    (b'h', b'e'): 2,    (b'e', b'l'): 2,    (b'l', b'l'): 2,  # ← 最高频，将被合并    (b'l', b'o'): 2,    (b'w', b'o'): 1,    (b'o', b'r'): 1,    (b'r', b'l'): 1,    (b'l', b'd'): 1,}# 合并 (b'l', b'l') → merged_bytes = b'll'# 合并后：pre_token_counts = {    (b'h', b'e', b'll', b'o'): 2,  # "hello" 中的 ll 被合并    (b'w', b'o', b'r', b'l', b'd'): 1,  # "world" 中没有 ll，不变}merge_tables = {    (b'h', b'e'): 2,    (b'e', b'll'): 2,    # 新增：e-ll (原来 e-l 的一部分)    (b'll', b'o'): 2,    # 新增：ll-o (原来 l-o 的一部分)    (b'l', b'l'): 0,     # 删除：ll 不再作为相邻对出现    (b'w', b'o'): 1,    (b'o', b'r'): 1,    (b'r', b'l'): 1,    (b'l', b'd'): 1,}
+
+
+"""
+from .pretokenization_example import process_parallel
+
+def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict[int, bytes])->tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    
     current_count = 0
+    merges = []
+
+    # 初始化 merge_tables：统计所有相邻对的频率（只计算一次）
+    merge_tables = {}
+    for token, count in pre_token_counts.items():
+        for i in range(len(token)-1):
+            char_pair = token[i:i+2]
+            merge_tables[char_pair] = merge_tables.get(char_pair, 0) + count
 
     while current_count < merge_counts:
-        #count the frequency of all adjacent character pairs
-        merge_tables = {}
-        for token, count in pre_token_counts.items():
-            for i in range(len(token)-1):
-                char_pair = token[i:i+2]
-                merge_tables[char_pair] = merge_tables.get(char_pair, 0) + count
-        
-        if not merge_tables:
-            break  
-            
-        most_frequent_pair = max(merge_tables.items(), key=lambda x: x[1])
+        #第一步：查找词频最高的对，如果词频相同，则按字典序排序
+        most_frequent_pair = max(merge_tables.items(), 
+                            key=lambda x: (x[1], x[0]))
         char_pair_tuple = most_frequent_pair[0]  # tuple[bytes, bytes]
-        
-        # 合并两个 bytes 成一个新的 token
-        merged_bytes = char_pair_tuple[0] + char_pair_tuple[1]
-        vocab[len(vocab)] = merged_bytes
-        
-        # 记录这次合并
-        merges.append((char_pair_tuple[0], char_pair_tuple[1]))
+        A, B = char_pair_tuple
+        merged_bytes = A + B
 
-        # update thepre_token_counts table by merging the most frequent pair
+        #第二步：更新vocab，添加merged_bytes到vocab中
+        vocab[len(vocab)] = merged_bytes
+
+        #第三步：更新merges，添加(A, B)到merges中
+        merges.append((A, B))
+
+        #第四步：更新pre_token_counts和merge_tables（增量更新）
+        """
+        对于每个包含 (A, B) 的 token：
+            1. 将token中的(A, B)替换成AB
+            2. 更新merge_tables：删除(A, B)的计数
+            3. 如果前面有元素X，删除(X, A)，增加(X, AB)
+            4. 如果后面有元素Y，删除(B, Y)，增加(AB, Y)
+        """
         new_pre_token_counts = {}
-        for token,count in pre_token_counts.items():
+        for token, count in pre_token_counts.items():
             new_token = []
             i = 0
             while i < len(token):
                 if i < len(token)-1 and token[i:i+2] == char_pair_tuple:
+                    # 找到要合并的对，替换为merged_bytes
                     new_token.append(merged_bytes)
+                    
+                    # 更新merge_tables：删除(A, B)的计数
+                    merge_tables[char_pair_tuple] = merge_tables.get(char_pair_tuple, 0) - count
+                    if merge_tables[char_pair_tuple] <= 0:
+                        del merge_tables[char_pair_tuple]
+                    
+                    # 如果前面有元素X，删除(X, A)，增加(X, AB)
+                    if i > 0:
+                        X = token[i-1]
+                        old_pair = (X, A)
+                        merge_tables[old_pair] = merge_tables.get(old_pair, 0) - count
+                        if merge_tables[old_pair] <= 0:
+                            del merge_tables[old_pair]
+                        new_pair = (X, merged_bytes)
+                        merge_tables[new_pair] = merge_tables.get(new_pair, 0) + count
+                    
+                    # 如果后面有元素Y，删除(B, Y)，增加(AB, Y)
+                    if i < len(token)-2:
+                        Y = token[i+2]
+                        old_pair = (B, Y)
+                        merge_tables[old_pair] = merge_tables.get(old_pair, 0) - count
+                        if merge_tables[old_pair] <= 0:
+                            del merge_tables[old_pair]
+                        new_pair = (merged_bytes, Y)
+                        merge_tables[new_pair] = merge_tables.get(new_pair, 0) + count
+                    
                     i += 2
                 else:
                     new_token.append(token[i])
                     i += 1
             new_pre_token_counts[tuple(new_token)] = count
         pre_token_counts = new_pre_token_counts
+        
         current_count += 1
 
     return vocab, merges
+
 
 
 def bpe_tokenizer(input_path:str,vocab_size:int,special_tokens:list[str])->tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:

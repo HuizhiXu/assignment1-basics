@@ -57,7 +57,38 @@ initial byte vocabulary, vocabulary items produced from merging, and any special
 special_tokens: list[str] A list of strings to add to the vocabulary. These special tokens do not
 otherwise affect BPE training.
 Your BPE training function should return the resulting vocabulary and merges:
-vocab: dict[int, bytes] The tokenizer vocabulary, a mapping from int (token ID in the vocabulary) to bytes (token bytes).
+vocab: dict[int, bytes] The tokenizer vocabulary, a mapping from int (token ID in the vocabulary) to bytes (token bytes).
 merges: list[tuple[bytes, bytes]] A list of BPE merges produced from training. Each list item
 is a tuple of bytes (<token1>, <token2>), representing that <token1> was merged with
 <token2>. The merges should be ordered by order of creation.
+
+The BPE training function is in cs336_basics/train_bpe.py, and it passes all the tests. 
+When running: `uv run pytest tests/test_train_bpe.py`, it outputs:
+
+```
+tests/test_train_bpe.py::test_train_bpe_speed 并行处理 耗时: 0.03 秒
+PASSED
+tests/test_train_bpe.py::test_train_bpe 并行处理 耗时: 0.04 秒
+PASSED
+tests/test_train_bpe.py::test_train_bpe_special_tokens 并行处理 耗时: 0.14 秒
+PASSED
+
+================================= 3 passed in 7.06s
+```
+
+# Problem (train_bpe_tinystories): BPE Training on TinyStories (15 points)
+
+(a) Train a byte-level BPE tokenizer on the TinyStories dataset, using a maximum vocabulary size
+of 10,000. Make sure to add the TinyStories <|endoftext|> special token to the vocabulary.
+Serialize the resulting vocabulary and merges to disk for further inspection. How many hours
+and memory did training take? What is the longest token in the vocabulary? Does it make sense?
+Resource requirements: ≤ 30 minutes (no GPUs), ≤ 30GB RAM
+Hint You should be able to get under 2 minutes for BPE training using multiprocessing during
+pretokenization and the following two facts:
+(a) The <|endoftext|> token delimits documents in the data files.
+(b) The <|endoftext|> token is handled as a special case before the BPE merges are applied.
+Deliverable: A one-to-two sentence response.
+
+
+(b) Profile your code. What part of the tokenizer training process takes the most time?
+Deliverable: A one-to-two sentence response.

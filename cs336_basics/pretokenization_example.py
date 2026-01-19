@@ -103,15 +103,15 @@ def find_chunk_boundaries(
 
 ## Usage
 # 获取边界列表后，遍历边界列表，读取每个chunk并解码为文本
-"""
+r"""
 这里有两种情况：
 1. 只有单个special token， 例如 special_tokens = =["<|endoftext|>"]
 2. 有多个special token，例如 special_tokens = ["<|endoftext|>", "<|pad|>", "<|unk|>"]
 "|".join(special_tokens) 会得到 "<|endoftext|>|<|pad|>|<|unk|>" 匹配任意一个special token
 如果special token本身包含 | ，先对每个 token 单独转义，再用 | 连接。
-在正则表达式中，| 在正则中总是“或”运算符，要匹配字面的 |，必须转义为 \|。
+在正则表达式中，| 在正则中总是"或"运算符，要匹配字面的 |，必须转义为 \|。
 re.escape 的作用：转义正则特殊字符，让它们被当作普通文本匹配。
-在正则表达式中，| 的优先级很高，它会先被解释为“或”运算符，而不是文本字符。
+在正则表达式中，| 的优先级很高，它会先被解释为"或"运算符，而不是文本字符。
 
 """
 
@@ -162,7 +162,7 @@ def process_single_chunk(args):
 def process_serial(file_path:str)->dict[str, int]:
 
     special_tokens = ["<|endoftext|>"]
-    desired_num_chunks = 4
+    desired_num_chunks = multiprocessing.cpu_count()
     
     # 串行处理：使用已打开的文件对象
     from collections import Counter
@@ -180,7 +180,7 @@ def process_serial(file_path:str)->dict[str, int]:
 @timer(name="并行处理")
 def process_parallel(file_path:str):
     special_tokens = ["<|endoftext|>"]
-    desired_num_chunks = 4
+    desired_num_chunks = multiprocessing.cpu_count()
     
     # 先获取 boundaries
     with open(file_path, "rb") as f:

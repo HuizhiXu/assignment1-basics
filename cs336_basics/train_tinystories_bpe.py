@@ -3,6 +3,7 @@ import cProfile
 import pstats
 import json
 import os
+import psutil
 from pathlib import Path
 from tests.common import gpt2_bytes_to_unicode
 from train_bpe import bpe_tokenizer
@@ -55,9 +56,17 @@ def train_tinystories_bpe(input_path:str, vocab_size:int, special_tokens:list[st
     pr = cProfile.Profile()
     pr.enable()
     start_time = time.time()
-    tracemalloc.start()
-
+    
+    # 使用psutil测量进程内存（更准确）
+    process = psutil.Process(os.getpid())
+    memory_before = process.memory_info().rss / 1024 / 1024  # MB
+    peak_memory = memory_before
+    
     vocab, merges = bpe_tokenizer(input_path, vocab_size, special_tokens)
+    
+    # 获取峰值内存
+    memory_after = process.memory_info().rss / 1024 / 1024  # MB
+    peak_memory = max(peak_memory, memory_after)
 
     pr.disable()
     s = pstats.Stats(pr)
@@ -78,8 +87,6 @@ def train_tinystories_bpe(input_path:str, vocab_size:int, special_tokens:list[st
 
     end_time = time.time()
     elapsed_seconds = end_time - start_time
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
     
     # 时间格式转换：转换为小时、分钟、秒
     hours = int(elapsed_seconds // 3600)
@@ -95,7 +102,7 @@ def train_tinystories_bpe(input_path:str, vocab_size:int, special_tokens:list[st
         print(f"Time taken: {minutes} minute(s), {seconds:.2f} seconds ({elapsed_seconds:.2f} seconds total)")
     else:
         print(f"Time taken: {seconds:.2f} seconds")
-    print(f"Memory usage: {current / 1024 / 1024:.2f} MB (peak: {peak / 1024 / 1024:.2f} MB)")
+    print(f"Memory usage: {memory_after:.2f} MB (peak: {peak_memory:.2f} MB)")
     print("="*80 + "\n")  
 
     # 序列化并保存词汇表和合并表到磁盘
@@ -124,11 +131,35 @@ def train_tinystories_bpe(input_path:str, vocab_size:int, special_tokens:list[st
 
     # 找出最长的token
     longest_token = max(vocab_serialized.keys(), key=len)
-    print(f"The longest token is: {longest_token}")
+    longest_token_length = len(longest_token)
+    longest_token_id = vocab_serialized[longest_token]
+    
+    # 获取原始字节表示（从vocab中查找）
+    longest_token_bytes = vocab[longest_token_id]
+    
+    print("\n" + "="*80)
+    print("Longest Token Analysis")
+    print("="*80)
+    print(f"Longest token (serialized string): {repr(longest_token)}")
+    print(f"Token length: {longest_token_length} characters (in serialized form)")
+    print(f"Token ID: {longest_token_id}")
+    print(f"Token bytes: {longest_token_bytes}")
+    print(f"Token bytes length: {len(longest_token_bytes)} bytes")
+    
+    # 尝试解码为UTF-8看看是否是有意义的文本
+    try:
+        decoded = longest_token_bytes.decode('utf-8')
+        print(f"Decoded as UTF-8: {repr(decoded)}")
+        # 检查是否包含可读文本
+        has_text = any(c.isalnum() or c.isspace() for c in decoded)
+        print(f"Does it make sense? {'Yes - contains readable text' if has_text else 'Possibly not - may be non-textual byte patterns or special characters'}")
+    except UnicodeDecodeError:
+        print("Cannot decode as UTF-8 (likely contains non-textual byte patterns)")
+    print("="*80 + "\n")
 
     return vocab_serialized, merges_serialized
 
 
 if __name__ == "__main__":
-    input_file = project_path / 'data' / 'TinyStoriesV2-GPT4-valid.txt'
-    vocab, merges = train_tinystories_bpe(str(input_file), 10000, ["<|endoftext|>"], output_prefix="tinystories")
+    input_file = project_path / 'data' / 'TinyStoriesV2-GPT4-train.txt'
+    vocab, merges = train_tinystories_bpe(str(input_file), 10000, ["<|endoftext|>"], output_prefix="tinystories-train")

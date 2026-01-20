@@ -45,6 +45,7 @@ even faster
 
 """
 import sys
+import heapq
 from pretokenization_example import process_parallel
 
 def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict[int, bytes])->tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
@@ -56,9 +57,18 @@ def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict
     # 初始化 merge_tables：统计所有相邻对的频率（只计算一次）
     merge_tables = {}
     for token, count in pre_token_counts.items():
-        for i in range(len(token)-1):
-            char_pair = token[i:i+2]
+        token_len = len(token)
+        for i in range(token_len - 1):
+            # 优化：直接创建tuple，避免切片
+            char_pair = (token[i], token[i+1])
+            # 优化：使用get方法
             merge_tables[char_pair] = merge_tables.get(char_pair, 0) + count
+
+    # 使用堆来维护最高频的pair，避免每次都调用max()
+    # 堆中存储 (-frequency, pair)，这样最大的frequency在堆顶
+    # 注意：使用负频率是因为heapq是最小堆
+    heap = [(-freq, pair) for pair, freq in merge_tables.items()]
+    heapq.heapify(heap)
 
     print(f"Starting BPE merging: {merge_counts} merges needed...", file=sys.stderr, flush=True)
     while current_count < merge_counts:
@@ -66,12 +76,19 @@ def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict
         if not merge_tables:
             break
         
-        #第一步：查找词频最高的对，如果词频相同，则按字典序排序
-        most_frequent_pair = max(merge_tables.items(), 
-                            key=lambda x: (x[1], x[0]))
-        char_pair_tuple = most_frequent_pair[0]  # tuple[bytes, bytes]
-        A, B = char_pair_tuple
-        merged_bytes = A + B
+        #第一步：从堆中获取词频最高的对
+        # 需要跳过已经被删除的pair（频率为0或不存在）
+        while heap:
+            neg_freq, char_pair_tuple = heapq.heappop(heap)
+            freq = -neg_freq
+            # 检查这个pair是否还存在且频率匹配
+            if char_pair_tuple in merge_tables and merge_tables[char_pair_tuple] == freq:
+                A, B = char_pair_tuple
+                merged_bytes = A + B
+                break
+        else:
+            # 堆空了，无法继续合并
+            break
 
         #第二步：更新vocab，添加merged_bytes到vocab中
         vocab[len(vocab)] = merged_bytes
@@ -79,37 +96,111 @@ def merge(merge_counts:int, pre_token_counts:dict[tuple[bytes], int], vocab:dict
         #第三步：更新merges，添加(A, B)到merges中
         merges.append((A, B))
 
-        #第四步：更新pre_token_counts（替换所有(A, B)为merged_bytes）
-        """
-        对于每个包含 (A, B) 的 token：
-            1. 将token中的所有(A, B)替换成AB
-        """
+        #第四步：更新pre_token_counts和merge_tables（增量更新）
         new_pre_token_counts = {}
+        
         for token, count in pre_token_counts.items():
+            # 缓存token长度，避免重复调用len()
+            token_len = len(token)
+            
+            # 快速检查：如果token长度小于2，不可能包含pair
+            if token_len < 2:
+                new_pre_token_counts[token] = new_pre_token_counts.get(token, 0) + count
+                continue
+            
+            # 优化：直接比较token[i]和token[i+1]，避免创建tuple切片
+            # 检查这个token是否包含要合并的pair (A, B)
+            has_pair = False
+            for i in range(token_len - 1):
+                if token[i] == A and token[i+1] == B:
+                    has_pair = True
+                    break
+            
+            if not has_pair:
+                # 如果token不包含(A, B)，直接保留，不需要更新merge_tables
+                new_pre_token_counts[token] = new_pre_token_counts.get(token, 0) + count
+                continue
+            
+            # token包含(A, B)，需要更新merge_tables（三种情况）
+            # 对于每个出现 (A, B) 的位置，比如 ...X A B Y...，合并后变成 ...X AB Y...
+            # 
+            # 情况1：删除 (A, B) 本身 - 因为A和B被合并了
+            # 情况2：减少受影响的相邻对频率：
+            #   - (X, A) 需要减少，因为原来是 X-A-B，现在变成 X-AB
+            #   - (B, Y) 需要减少，因为原来是 A-B-Y，现在变成 AB-Y
+            # 情况3：增加新的相邻对频率：
+            #   - (X, AB) 需要增加（如果X存在）
+            #   - (AB, Y) 需要增加（如果Y存在）
+            
+            # 构建新token并同时更新merge_tables
             new_token = []
             i = 0
-            while i < len(token):
-                if i < len(token)-1 and token[i:i+2] == char_pair_tuple:
-                    # 找到要合并的对，替换为merged_bytes
+            while i < token_len:
+                # 优化：直接比较，避免tuple切片
+                if i < token_len - 1 and token[i] == A and token[i+1] == B:
+                    # 找到 (A, B) 的位置
+                    # 情况1：删除 (A, B) 的频率
+                    if char_pair_tuple in merge_tables:
+                        merge_tables[char_pair_tuple] -= count
+                        if merge_tables[char_pair_tuple] <= 0:
+                            del merge_tables[char_pair_tuple]
+                        else:
+                            # 更新堆：添加新的频率
+                            heapq.heappush(heap, (-merge_tables[char_pair_tuple], char_pair_tuple))
+                    
+                    # 情况2：减少受影响的相邻对频率
+                    # 如果前面有字符X，减少 (X, A) 的频率
+                    if i > 0:
+                        X_A_pair = (token[i-1], A)
+                        if X_A_pair in merge_tables:
+                            merge_tables[X_A_pair] -= count
+                            if merge_tables[X_A_pair] <= 0:
+                                del merge_tables[X_A_pair]
+                            else:
+                                # 更新堆
+                                heapq.heappush(heap, (-merge_tables[X_A_pair], X_A_pair))
+                    
+                    # 如果后面有字符Y，减少 (B, Y) 的频率
+                    if i + 2 < token_len:
+                        B_Y_pair = (B, token[i+2])
+                        if B_Y_pair in merge_tables:
+                            merge_tables[B_Y_pair] -= count
+                            if merge_tables[B_Y_pair] <= 0:
+                                del merge_tables[B_Y_pair]
+                            else:
+                                # 更新堆
+                                heapq.heappush(heap, (-merge_tables[B_Y_pair], B_Y_pair))
+                    
+                    # 情况3：增加新的相邻对频率
+                    # 如果前面有字符X，增加 (X, AB) 的频率
+                    if i > 0:
+                        X_AB_pair = (token[i-1], merged_bytes)
+                        merge_tables[X_AB_pair] = merge_tables.get(X_AB_pair, 0) + count
+                        # 添加到堆
+                        heapq.heappush(heap, (-merge_tables[X_AB_pair], X_AB_pair))
+                    
+                    # 如果后面有字符Y，增加 (AB, Y) 的频率
+                    if i + 2 < token_len:
+                        AB_Y_pair = (merged_bytes, token[i+2])
+                        merge_tables[AB_Y_pair] = merge_tables.get(AB_Y_pair, 0) + count
+                        # 添加到堆
+                        heapq.heappush(heap, (-merge_tables[AB_Y_pair], AB_Y_pair))
+                    
+                    # 替换为合并后的token
                     new_token.append(merged_bytes)
                     i += 2
                 else:
                     new_token.append(token[i])
                     i += 1
-            new_pre_token_counts[tuple(new_token)] = count
+            
+            new_token_tuple = tuple(new_token)
+            
+            # 更新pre_token_counts（优化：使用get方法）
+            new_pre_token_counts[new_token_tuple] = new_pre_token_counts.get(new_token_tuple, 0) + count
         
         # 合并相同的新token（可能有多个token合并后变成相同的）
-        merged_pre_token_counts = {}
-        for token, count in new_pre_token_counts.items():
-            merged_pre_token_counts[token] = merged_pre_token_counts.get(token, 0) + count
-        pre_token_counts = merged_pre_token_counts
+        pre_token_counts = new_pre_token_counts
         
-        # 第五步：基于更新后的pre_token_counts重新计算merge_tables
-        merge_tables = {}
-        for token, count in pre_token_counts.items():
-            for i in range(len(token)-1):
-                char_pair = token[i:i+2]
-                merge_tables[char_pair] = merge_tables.get(char_pair, 0) + count
         
         current_count += 1
         

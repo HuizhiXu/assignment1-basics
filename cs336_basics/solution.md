@@ -89,6 +89,18 @@ pretokenization and the following two facts:
 (b) The <|endoftext|> token is handled as a special case before the BPE merges are applied.
 Deliverable: A one-to-two sentence response.
 
+The most time-consuming part of tokenizer training is the BPE merge process (the merge function), which takes approximately 28 seconds out of the total 47 seconds. Within the merge function, dictionary lookups (dict.get()), length calculations (len()), and list append operations account for significant overhead due to their high frequency of calls (millions of times).
+
 
 (b) Profile your code. What part of the tokenizer training process takes the most time?
+Deliverable: A one-to-two sentence response.
+
+
+# Problem (train_bpe_expts_owt): BPE Training on OpenWebText (2 points)
+(a) Train a byte-level BPE tokenizer on the OpenWebText dataset, using a maximum vocabulary
+size of 32,000. Serialize the resulting vocabulary and merges to disk for further inspection. What
+is the longest token in the vocabulary? Does it make sense?
+Resource requirements: ≤ 12 hours (no GPUs), ≤ 100GB RAM
+Deliverable: A one-to-two sentence response.
+(b) Compare and contrast the tokenizer that you get training on TinyStories versus OpenWebText.
 Deliverable: A one-to-two sentence response.
